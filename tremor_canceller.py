@@ -1,28 +1,28 @@
 """
-Tremor canceller: LSM6DSOX gyro -> band-pass (1st-order HP + 2nd-order LP) + PD -> DRV8835 -> DAEX25FHE-4 Exciter
+Tremor canceller: MPU-6051M / MPU-6050 (GY-521) gyro -> band-pass (1st-order HP + 2nd-order LP) + PD -> Adafruit DRV8871 -> Speaker/Exciter
 MicroPython (written for Raspberry Pi Pico / RP2040; adjust pins for other boards)
 
 WIRING
-  LSM6DSOX (Qwiic/I2C):  SDA -> GP0, SCL -> GP1, 3V3, GND   (address 0x6A or 0x6B, auto-detected)
+  MPU-6051M / MPU-6050 on GY-521 breakout (I2C0):
+      VCC             -> 3V3(OUT) (Physical Pin 36)
+      GND             -> GND      (Physical Pin 3)
+      SCL             -> GP1      (Physical Pin 2)
+      SDA             -> GP0      (Physical Pin 1)
+      AD0             -> GND or leave floating for 0x68 (or 3V3 for 0x69; auto-detected)
 
-  DRV8835 Motor Driver (auto-detects Qwiic I2C or direct GPIO PWM):
-    Option A - SparkFun Qwiic Motor Driver (ROB-15451, I2C):
-      Qwiic cable       -> Daisy-chained on GP0 (SDA) / GP1 (SCL), 3V3, GND (default addr 0x5D)
-      VIN / GND         -> Motor supply (3.0 - 5.0 V recommended) and common ground
-      A1 / A2           -> Dayton Audio DAEX25FHE-4 exciter terminals
+  Adafruit DRV8871 Motor Driver (dual-PWM slow-decay/brake mode):
+      IN1             -> GP14     (Physical Pin 19, PWM7 A)
+      IN2             -> GP15     (Physical Pin 20, PWM7 B)
+      VM  (or + term) -> Boost converter output (6.5 V - 45 V; set VM_VOLTS below to match!)
+      GND (or - term) -> Common ground with Pico and boost converter
+      MOTOR OUT1/OUT2 -> Speaker / exciter terminals
 
-    Option B - Direct DRV8835 GPIO (PHASE/ENABLE mode, channel A):
-      MODE              -> GP13  (driven HIGH by this script; or tie to VCC)
-      APHASE (AIN1)     -> GP14  (direction)
-      AENABLE (AIN2)    -> GP15  (PWM = magnitude)
-      VCC / VM / GND    -> 3V3 logic, 3.0 - 5.0 V motor supply, common ground
-      AOUT1 / AOUT2     -> Dayton Audio DAEX25FHE-4 exciter terminals
-
-EXCITER & DRIVER SAFETY
-  Dayton Audio DAEX25FHE-4 (4 ohm, 24 W RMS) driven by TI DRV8835 (1.2 A cont / 1.5 A peak per channel):
-    * caps output voltage to SPEAKER_MAX_V (4.8 V -> <= 1.2 A peak into 4 ohm)
-    * runs a running-power limiter (SPEAKER_CONT_W = 2.5 W) to protect the DRV8835 thermally
-    * cuts output to zero on any sensor error or program exit
+SPEAKER & DRIVER SAFETY
+  Adafruit DRV8871 has built-in 2.0 A current limiting and thermal shutdown.
+  In addition, this script:
+    * scales PWM duty by VM_VOLTS so peak voltage never exceeds SPEAKER_MAX_V
+    * runs a rolling thermal power limiter (SPEAKER_CONT_W) over POWER_WINDOW_S
+    * cuts both IN1 and IN2 to 0 (coast / sleep) on any sensor error or program exit
 """
 
 import time
@@ -35,7 +35,7 @@ from machine import Pin, I2C, PWM
 # 1. CONFIGURATION
 # ==============================================================================
 GYRO_AXIS = 0            # 0 = X, 1 = Y, 2 = Z  (axis the tremor rotates about)
-OUTPUT_SIGN = 1          # flip to -1 if the exciter pushes WITH the tremor instead of against it
+OUTPUT_SIGN = 1          # flip to -1 if the actuator pushes WITH the tremor instead of against it
 ENABLE_OUTPUT = True     # False = telemetry only (motor driver never driven) for bring-up
 
 # Loop timing
@@ -52,20 +52,20 @@ KD = 0.008               # phase lead (KP * 0.008 s) to offset low-pass + mechan
 DEADZONE_DPS = 3.0       # soft deadzone, deg/s (stops idle buzz)
 FULL_SCALE_DPS = 60.0    # (KP*tremor + KD*accel) of this size = 100% command
 
-# Power / driver limits (Dayton Audio DAEX25FHE-4: 4 ohm, 24 W RMS; DRV8835: 1.2 A continuous)
-VM_VOLTS = 5.0           # actual voltage on the DRV8835 VM/VIN pin (MEASURE IT)
-SPEAKER_OHMS = 4.0       # DAEX25FHE-4 nominal impedance (Re = 4.3 ohm)
-SPEAKER_MAX_V = 4.8      # 4.8 V / 4.0 ohm = 1.2 A peak (DRV8835 continuous current rating)
-SPEAKER_CONT_W = 2.5     # continuous average power budget (protects DRV8835 IC thermally)
-POWER_WINDOW_S = 2.0     # averaging window for the power limiter
-PWM_HZ = 20000           # above hearing range (used in direct GPIO PWM mode)
+# Power / driver limits (Adjust VM_VOLTS to match your boost converter output!)
+VM_VOLTS = 9.0           # actual voltage from boost converter on DRV8871 VM pin (6.5 V min for DRV8871)
+SPEAKER_OHMS = 4.0       # speaker nominal impedance (e.g., 2.0 or 4.0 ohm)
+SPEAKER_MAX_V = 4.8      # peak allowed voltage across speaker during initial burst
+SPEAKER_CONT_W = 2.5     # continuous average thermal power budget (watts)
+POWER_WINDOW_S = 1.0     # averaging window (s) before thermal limiter forces power down
+PWM_HZ = 20000           # 20 kHz (ultrasonic; DRV8871 supports up to 200 kHz)
 
 MAX_DUTY = min(1.0, SPEAKER_MAX_V / VM_VOLTS)
 MAX_MEAN_SQ_V = SPEAKER_CONT_W * SPEAKER_OHMS    # allowed mean(V^2) in volts^2
 
 # Pins
 PIN_SDA, PIN_SCL = 0, 1
-PIN_MODE, PIN_PHASE, PIN_ENABLE = 13, 14, 15
+PIN_IN1, PIN_IN2 = 14, 15
 
 # Safety
 MAX_CONSECUTIVE_I2C_FAILS = 10
@@ -73,139 +73,92 @@ USE_WATCHDOG = False     # True = reset board if loop hangs (note: Ctrl-C in Tho
                          # then reboot the board ~1 s later, since a WDT cannot be stopped)
 
 # ==============================================================================
-# 2. LSM6DSOX DRIVER (gyro only)
+# 2. MPU-6051M / MPU-6050 DRIVER (GY-521 breakout, gyro only)
 # ==============================================================================
-_WHO_AM_I = 0x0F
-_CTRL1_XL = 0x10
-_CTRL2_G = 0x11
-_CTRL3_C = 0x12
-_OUTX_L_G = 0x22
-_LSM6DSOX_ID = 0x6C
-_GYRO_DPS_PER_LSB = 0.0175   # 17.50 mdps/LSB at +/-500 dps
+_MPU_SMPLRT_DIV = 0x19
+_MPU_CONFIG = 0x1A
+_MPU_GYRO_CONFIG = 0x1B
+_MPU_GYRO_XOUT_H = 0x43
+_MPU_PWR_MGMT_1 = 0x6B
+_MPU_WHO_AM_I = 0x75
+_GYRO_DPS_PER_LSB = 1.0 / 65.5   # 65.5 LSB/(deg/s) at +/-500 dps (~0.015267 dps/LSB)
 
 
-class LSM6DSOX:
+class MPU6050:
     def __init__(self, i2c):
         self.i2c = i2c
         self.addr = None
-        for a in (0x6A, 0x6B):
-            if a in i2c.scan():
+        self.who_am_i = None
+        scanned = i2c.scan()
+        for a in (0x68, 0x69):
+            if a in scanned:
                 try:
-                    if i2c.readfrom_mem(a, _WHO_AM_I, 1)[0] == _LSM6DSOX_ID:
-                        self.addr = a
-                        break
+                    self.who_am_i = i2c.readfrom_mem(a, _MPU_WHO_AM_I, 1)[0]
+                    self.addr = a
+                    break
                 except OSError:
                     pass
         if self.addr is None:
-            raise RuntimeError("LSM6DSOX not found. Check wiring / I2C address.")
+            raise RuntimeError("MPU-6051M / GY-521 not found at 0x68 or 0x69. Check wiring.")
 
         self._buf = bytearray(6)
-        # Software reset, then configure
-        i2c.writeto_mem(self.addr, _CTRL3_C, b'\x01')
+        # Device reset, then wake from sleep and select X-axis gyro PLL clock (0x01)
+        i2c.writeto_mem(self.addr, _MPU_PWR_MGMT_1, b'\x80')
+        time.sleep_ms(50)
+        i2c.writeto_mem(self.addr, _MPU_PWR_MGMT_1, b'\x01')
         time.sleep_ms(20)
-        i2c.writeto_mem(self.addr, _CTRL3_C, b'\x44')   # BDU=1, IF_INC=1
-        i2c.writeto_mem(self.addr, _CTRL1_XL, b'\x00')  # accelerometer off (not used)
-        # ODR_G = 833 Hz (0111), FS_G = 500 dps (01) -> 0x74
-        i2c.writeto_mem(self.addr, _CTRL2_G, b'\x74')
-        time.sleep_ms(100)  # let gyro settle after power-up
+        # DLPF_CFG = 1 (188 Hz bandwidth, 1 kHz internal rate), SMPLRT_DIV = 0 (1 kHz)
+        i2c.writeto_mem(self.addr, _MPU_CONFIG, b'\x01')
+        i2c.writeto_mem(self.addr, _MPU_SMPLRT_DIV, b'\x00')
+        # FS_SEL = 1 (+/-500 dps -> 0x08)
+        i2c.writeto_mem(self.addr, _MPU_GYRO_CONFIG, b'\x08')
+        time.sleep_ms(100)  # let gyro PLL and DLPF settle
 
     def read_dps(self):
-        """Angular velocity (deg/s) on GYRO_AXIS."""
-        self.i2c.readfrom_mem_into(self.addr, _OUTX_L_G, self._buf)
-        raw = struct.unpack_from('<h', self._buf, GYRO_AXIS * 2)[0]
+        """Angular velocity (deg/s) on GYRO_AXIS. MPU-605x registers are big-endian (>h)."""
+        self.i2c.readfrom_mem_into(self.addr, _MPU_GYRO_XOUT_H, self._buf)
+        raw = struct.unpack_from('>h', self._buf, GYRO_AXIS * 2)[0]
         return raw * _GYRO_DPS_PER_LSB
 
 
 # ==============================================================================
-# 3. DRV8835 EXCITER DRIVER (Auto-detects SparkFun Qwiic I2C or Direct GPIO PWM)
+# 3. ADAFRUIT DRV8871 DRIVER (Dual-PWM with Slow-Decay / Brake Mode)
 # ==============================================================================
-_SCMD_ID_REG = 0x01
-_SCMD_ID_VAL = 0xA9
-_SCMD_MA_DRIVE = 0x20
-_SCMD_MB_DRIVE = 0x21
-_SCMD_DRIVER_ENABLE = 0x70
-_SCMD_STATUS_1 = 0x77
-_SCMD_ADDRS = (0x5D, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5E, 0x5F, 0x60, 0x61, 0x62, 0x63)
-
-
 class Speaker:
     def __init__(self):
-        # Always initialize GPIO pins to safe zero state immediately
-        self.mode = Pin(PIN_MODE, Pin.OUT, value=1)    # HIGH = PHASE/ENABLE mode
-        self.phase = Pin(PIN_PHASE, Pin.OUT, value=0)
-        self.en = PWM(Pin(PIN_ENABLE))
-        self.en.freq(PWM_HZ)
-        self.en.duty_u16(0)
-
-        self.i2c = None
-        self.scmd_addr = None
-        self._tx = bytearray(1)
-
-    def attach_i2c(self, i2c):
-        """Detect SparkFun Qwiic Motor Driver (SCMD / DRV8835) on I2C if connected."""
-        scanned = i2c.scan()
-        for a in _SCMD_ADDRS:
-            if a in scanned:
-                try:
-                    if i2c.readfrom_mem(a, _SCMD_ID_REG, 1)[0] == _SCMD_ID_VAL:
-                        self.i2c = i2c
-                        self.scmd_addr = a
-                        break
-                except OSError:
-                    pass
-
-        if self.scmd_addr is not None:
-            # Wait for PSoC enumeration & busy flags to clear (up to 500 ms)
-            for _ in range(100):
-                status = self.i2c.readfrom_mem(self.scmd_addr, _SCMD_STATUS_1, 1)[0]
-                if status != 0xFF and (status & 0x7F) == 0:
-                    break
-                time.sleep_ms(5)
-            # Zero both motor channels (128 = stop) before enabling H-bridges
-            self._tx[0] = 128
-            self.i2c.writeto_mem(self.scmd_addr, _SCMD_MA_DRIVE, self._tx)
-            self.i2c.writeto_mem(self.scmd_addr, _SCMD_MB_DRIVE, self._tx)
-            self._tx[0] = 1
-            self.i2c.writeto_mem(self.scmd_addr, _SCMD_DRIVER_ENABLE, self._tx)
-            print("SparkFun Qwiic DRV8835 found at", hex(self.scmd_addr), "(I2C mode)")
-        else:
-            print("No Qwiic motor driver on I2C; using direct GPIO PWM on GP%d/GP%d/GP%d" %
-                  (PIN_MODE, PIN_PHASE, PIN_ENABLE))
+        # GP14 (PWM7 A) and GP15 (PWM7 B) share hardware slice 7 for phase-locked PWM
+        self.in1 = PWM(Pin(PIN_IN1))
+        self.in2 = PWM(Pin(PIN_IN2))
+        self.in1.freq(PWM_HZ)
+        self.in2.freq(PWM_HZ)
+        self.in1.duty_u16(0)
+        self.in2.duty_u16(0)
 
     def drive(self, cmd):
-        """cmd in [-1, 1]. Returns the voltage actually applied (signed, volts)."""
+        """
+        cmd in [-1, 1]. Returns the voltage actually applied (signed, volts).
+        Uses drive + slow-decay brake (IN1=1, IN2=1 during PWM off-time) for
+        crisp, linear bidirectional current reversals across the voice coil.
+        """
         if cmd > 1.0:
             cmd = 1.0
         elif cmd < -1.0:
             cmd = -1.0
-
-        if self.scmd_addr is not None:
-            # SCMD 7-bit signed drive: 128 = stop, 1..127 = reverse, 129..255 = forward
-            signed_duty = cmd * MAX_DUTY
-            level = int(round(signed_duty * 127.0))
-            if level > 127:
-                level = 127
-            elif level < -127:
-                level = -127
-            self._tx[0] = 128 + level
-            self.i2c.writeto_mem(self.scmd_addr, _SCMD_MA_DRIVE, self._tx)
-            return (level / 127.0) * VM_VOLTS
-
         duty = abs(cmd) * MAX_DUTY
-        self.phase.value(1 if cmd >= 0 else 0)
-        self.en.duty_u16(int(duty * 65535))
-        return duty * VM_VOLTS * (1 if cmd >= 0 else -1)
+        off_u16 = int((1.0 - duty) * 65535)
+        if cmd >= 0.0:
+            self.in1.duty_u16(65535)
+            self.in2.duty_u16(off_u16)
+            return duty * VM_VOLTS
+        else:
+            self.in1.duty_u16(off_u16)
+            self.in2.duty_u16(65535)
+            return -duty * VM_VOLTS
 
     def stop(self):
-        self.en.duty_u16(0)
-        if self.scmd_addr is not None:
-            try:
-                self._tx[0] = 128
-                self.i2c.writeto_mem(self.scmd_addr, _SCMD_MA_DRIVE, self._tx)
-                self._tx[0] = 0
-                self.i2c.writeto_mem(self.scmd_addr, _SCMD_DRIVER_ENABLE, self._tx)
-            except OSError:
-                pass
+        """Both inputs LOW = coast / low-power sleep (zero current through speaker)."""
+        self.in1.duty_u16(0)
+        self.in2.duty_u16(0)
 
 
 # ==============================================================================
@@ -273,10 +226,10 @@ def main():
     wdt = None
     try:
         i2c = I2C(0, sda=Pin(PIN_SDA), scl=Pin(PIN_SCL), freq=400000)
-        imu = LSM6DSOX(i2c)
-        print("LSM6DSOX found at", hex(imu.addr))
-        spk.attach_i2c(i2c)
-        print("Max duty %.0f%%  (%.2f V peak at VM=%.1f V)" % (MAX_DUTY * 100, MAX_DUTY * VM_VOLTS, VM_VOLTS))
+        imu = MPU6050(i2c)
+        print("GY-521 / MPU-6051M found at %s (WHO_AM_I=%s)" % (hex(imu.addr), hex(imu.who_am_i)))
+        print("DRV8871 PWM on GP%d/GP%d | Max duty %.0f%% (%.2f V peak at VM=%.1f V)" %
+              (PIN_IN1, PIN_IN2, MAX_DUTY * 100, MAX_DUTY * VM_VOLTS, VM_VOLTS))
 
         bias = calibrate_bias(imu)
 
@@ -345,13 +298,10 @@ def main():
 
                 # ---- 5. running power limiter --------------------------------
                 cmd *= out_scale
-                try:
-                    if ENABLE_OUTPUT:
-                        v = spk.drive(cmd)
-                    else:
-                        spk.stop()
-                        v = 0.0
-                except OSError:
+                if ENABLE_OUTPUT:
+                    v = spk.drive(cmd)
+                else:
+                    spk.stop()
                     v = 0.0
                 mean_sq_v += pw_alpha * (v * v - mean_sq_v)
                 if mean_sq_v > MAX_MEAN_SQ_V:
@@ -385,7 +335,7 @@ def main():
     except KeyboardInterrupt:
         print("Stopped.")
     finally:
-        spk.stop()   # ALWAYS de-energize the exciter, whatever happened
+        spk.stop()   # ALWAYS de-energize the speaker, whatever happened
 
 
 main()

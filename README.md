@@ -1,19 +1,19 @@
 # Active Hand Tremor Canceller (HackUMass XIV)
 
-An active, real-time hand tremor cancellation device built with a Raspberry Pi Pico (MicroPython), a 6-DoF IMU, a dual H-bridge motor driver, and a weighted audio exciter acting as an inertial reaction-mass actuator.
+An active, real-time hand tremor cancellation device built with a Raspberry Pi Pico (MicroPython), an InvenSense MPU-6051M / MPU-6050 6-DoF IMU (GY-521 breakout), an Adafruit DRV8871 H-bridge motor driver fed by a DC-DC boost converter, and a weighted speaker driver acting as an inertial reaction-mass actuator.
 
 ---
 
 ## 1. Parts List
 
 * **Microcontroller:** Raspberry Pi Pico (RP2040) with pre-soldered headers, running MicroPython
-* **Motion Sensor (IMU):** SparkFun / Adafruit **LSM6DSOX** 6-DoF Accelerometer & Gyroscope Breakout (Qwiic / STEMMA QT)
-* **Actuator Driver:** **SparkFun Qwiic Motor Driver (DRV8835)** *(also supports direct GPIO-driven DRV8835 carrier boards)*
-* **Inertial Actuator:** **Dayton Audio DAEX25FHE-4** Framed High-Efficiency 25mm Sound Exciter ($4\,\Omega$, 24 W RMS) with a counterweight glued to the voice coil coupler
+* **Motion Sensor (IMU):** **InvenSense MPU-6051M / MPU-6050** 6-DoF Accelerometer & Gyroscope on a **GY-521** breakout board
+* **Actuator Driver:** **Adafruit DRV8871** Brushed DC Motor Driver Breakout (6.5V–45V motor supply, 3.3V logic PWM, 2.0A internal current limiting)
+* **Inertial Actuator:** Weighted speaker driver / voice-coil actuator (2–4 $\Omega$, 5–8 W) with a counterweight attached to act as an inertial reaction-mass shaker
 * **Power & Breadboarding:**
   * 5V USB power brick (2A+ recommended) with a **spliced USB power cable** (`+5V` and `GND`)
-  * Solderless breadboard & jumper wires (plus Qwiic-to-breadboard jumpers or spliced Qwiic cables)
-  * Bulk decoupling capacitor (e.g., $100\,\mu\text{F}$–$470\,\mu\text{F}$ electrolytic) across the 5V motor supply rail
+  * **DC-DC Step-Up (Boost) Converter** (steps 5V USB up to **9V–12V** for the DRV8871 `VM` input, which requires $\ge 6.5\text{V}$)
+  * Solderless breadboard, jumper wires, and bulk decoupling capacitors across the 5V and boosted `VM` rails
 
 ---
 
@@ -24,79 +24,63 @@ Human hand tremors (such as essential and Parkinsonian tremors) typically oscill
 This device operates as a closed-loop **active inertial damper**:
 
 ```
-[ LSM6DSOX Gyro ] ---> [ 3-12 Hz Band-Pass + Phase Lead ] ---> [ DRV8835 Driver ] ---> [ Weighted Exciter ]
-   (Senses hand              (Isolates tremor & inverts           (Bidirectional          (Pushes against
- angular velocity)              the waveform on Pico)               power stage)           hand motion)
+[ MPU-6051M Gyro ] ---> [ 3-12 Hz Band-Pass + Phase Lead ] ---> [ Adafruit DRV8871 ] ---> [ Weighted Speaker ]
+   (Senses hand              (Isolates tremor & inverts           (Dual-PWM slow-          (Pushes against
+ angular velocity)              the waveform on Pico)              decay H-bridge)           hand motion)
 ```
 
-1. **Sense:** The **LSM6DSOX** gyroscope measures the angular velocity of the hand 250 times per second over I2C.
-2. **Filter:** The **Raspberry Pi Pico** passes the sensor readings through a **3–12 Hz band-pass filter**. This strips out slow, intentional hand movements (<3 Hz) as well as high-frequency vibrations and sensor noise (>12 Hz), leaving only the involuntary tremor wave.
+1. **Sense:** The **MPU-6051M (GY-521)** gyroscope measures the angular velocity of the hand 250 times per second over I2C (`0x68`).
+2. **Filter:** The **Raspberry Pi Pico** passes the sensor readings through a **3–12 Hz band-pass filter** (1st-order high-pass at 3 Hz + 2nd-order low-pass at 12 Hz). This strips out slow, intentional hand movements (<3 Hz) as well as high-frequency vibrations and sensor noise (>12 Hz), leaving only the involuntary tremor wave with minimal phase distortion.
 3. **Invert & Phase-Align:** The Pico generates an **inverted counter-wave** (`180°` out of phase with the tremor) and applies proportional-derivative (PD) phase compensation so the actuator responds without lag.
-4. **Cancel:** The **DRV8835** drives the weighted **Dayton Audio DAEX25FHE-4** exciter back and forth with the inverted wave. Accelerating the glued weight produces an equal-and-opposite reaction force that pushes against the tremor to stabilize the hand.
+4. **Cancel:** The **Adafruit DRV8871** drives the weighted speaker back and forth with the inverted wave using 20 kHz phase-locked dual PWM (`GP14` and `GP15`). Accelerating the attached weight produces an equal-and-opposite reaction force that damps the tremor to stabilize the hand.
 
 ---
 
 ## 3. Breadboard & Pin Wiring Guide
 
-### A. Power Distribution (Spliced 5V USB Cable)
+### A. Power Distribution (Spliced 5V USB + Boost Converter)
 
-> **CRITICAL VOLTAGE RULE:**  
-> The Raspberry Pi Pico logic, LSM6DSOX IMU, and Qwiic bus are strictly **3.3V logic**.  
-> * Send the **5V USB rail** ONLY to the Pico's **`VSYS`** pin and the motor driver's **`VIN` / `VM`** motor power input.  
-> * Power the sensor and Qwiic logic from the Pico's regulated **`3V3(OUT)`** pin.
+> **CRITICAL VOLTAGE RULES:**  
+> 1. The **Adafruit DRV8871** requires **6.5V to 45V** on its `VM` (`POWER +`) input. Feed your 5V USB rail into your **Boost Converter (`VIN+`/`VIN-`)**, adjust the boost output to **9V–12V**, and connect the boost output (`VOUT+`) **ONLY** to the DRV8871 `VM` (`+`) terminal.  
+> 2. **Never connect the boosted 9V–12V rail to the Raspberry Pi Pico or the GY-521!**  
+> 3. Remember to set `VM_VOLTS` in `tremor_canceller.py` to match the measured voltage of your boost converter output.
 
-| Source / Rail | Wire Color (Standard) | Connects To | Notes |
-| :--- | :--- | :--- | :--- |
-| **Spliced USB `+5V`** | Red | **Breadboard `+5V` Rail** | Main 5V supply from USB wall brick |
-| **Spliced USB `GND`** | Black | **Breadboard `GND` Rail** | Common ground reference for all boards |
-| **Breadboard `+5V` Rail** | Red | **Pico `VSYS` (Physical Pin 39)**<br>**DRV8835 `VIN` / `VM` (Motor Power)** | Place your decoupling capacitor across `+5V` and `GND` near the DRV8835 `VIN` pin |
-| **Pico `3V3(OUT)` (Physical Pin 36)** | Orange / Red | **Breadboard `+3.3V` Rail** | Supplies regulated 3.3V logic power to the LSM6DSOX and Qwiic bus |
-| **Breadboard `GND` Rail** | Black | **Pico `GND` (Physical Pin 38 & Pin 3)**<br>**LSM6DSOX `GND`**<br>**DRV8835 `GND`** | **All grounds must be tied together** |
-
-*(Note: If you also plug a micro-USB data cable from your laptop into the Pico for Thonny telemetry while the spliced 5V brick is powered, power the Pico via **`VSYS` (Pin 39)**— ideally through a 1N5817 Schottky diode—rather than `VBUS` (Pin 40), so the two 5V supplies do not back-feed each other.)*
-
----
-
-### B. Sensor & Motor Driver Signal Wiring
-
-`tremor_canceller.py` automatically detects whether you are using the **SparkFun Qwiic Motor Driver over I2C** (Option 1) or **Direct DRV8835 GPIO PWM pins** (Option 2).
-
-#### Option 1: Qwiic I2C Wiring (SparkFun Qwiic Motor Driver ROB-15451 + LSM6DSOX)
-Both the **LSM6DSOX** and the **SparkFun Qwiic Motor Driver** share the same 2-wire I2C bus (`I2C0`) on the Pico. You can daisy-chain them with a Qwiic cable or wire both to the same breadboard rows.
-
-*(Standard Qwiic cable wire colors: **Black** = `GND`, **Red** = `3.3V`, **Blue** = `SDA`, **Yellow** = `SCL`)*
-
-| Pico Pin Name | Pico Physical Pin # | LSM6DSOX Pin | SparkFun Qwiic Motor Driver Pin | Function |
-| :--- | :---: | :--- | :--- | :--- |
-| **`GP0` (I2C0 SDA)** | **Pin 1** *(top-left)* | `SDA` *(Blue)* | `SDA` *(Blue)* | I2C Data (400 kHz) |
-| **`GP1` (I2C0 SCL)** | **Pin 2** *(left, 2nd down)* | `SCL` *(Yellow)* | `SCL` *(Yellow)* | I2C Clock (400 kHz) |
-| **`GND`** | **Pin 3** *(left, 3rd down)* | `GND` *(Black)* | `GND` *(Black)* | Common Ground |
-| **`3V3(OUT)`** | **Pin 36** *(right, 5th down)* | `3V3` / `VIN` *(Red)* | `3.3V` *(Red, Qwiic logic)* | 3.3V Logic Supply |
-| **Breadboard `+5V`** | *(connected to Pin 39 `VSYS`)* | *Do not connect* | Screw Terminal **`VIN`** *(Max 11V)* | 5V Motor H-Bridge Power |
-| **Breadboard `GND`** | **Pin 38** *(right, 3rd down)* | `GND` | Screw Terminal **`GND`** | Motor Power Return |
-
----
-
-#### Option 2: Direct DRV8835 GPIO PWM Wiring (If Using Breakout Pins Directly)
-If using a DRV8835 board with direct `MODE`, `APHASE`, and `AENABLE` pins instead of Qwiic I2C, wire the LSM6DSOX to `GP0`/`GP1` as above and wire the DRV8835 control pins to the bottom-left of the Pico:
-
-| Pico Pin Name | Pico Physical Pin # | DRV8835 Breakout Pin | Function |
-| :--- | :---: | :--- | :--- |
-| **`GP13`** | **Pin 17** *(left, 4th from bottom)* | `MODE` | Driven `HIGH` (`3.3V`) for PHASE/ENABLE mode |
-| **`GP14`** | **Pin 19** *(left, 2nd from bottom)* | `APHASE` (`AIN1`) | Exciter push/pull direction |
-| **`GP15`** | **Pin 20** *(bottom-left corner)* | `AENABLE` (`AIN2`) | 20 kHz PWM magnitude control |
-| **`3V3(OUT)`** | **Pin 36** | `VCC` | 3.3V Logic Power |
-| **Breadboard `+5V`** | *(from spliced USB +5V)* | `VM` / `VIN` | 5V Motor Supply |
-| **Breadboard `GND`** | **Pin 18 / Pin 38** | `GND` | Common Ground |
-
----
-
-### C. Exciter Output Wiring (DRV8835 to Dayton Audio DAEX25FHE-4)
-
-| DRV8835 Terminal | Connects To | Notes |
+| Source / Rail | Connects To | Notes |
 | :--- | :--- | :--- |
-| **Channel A Output 1 (`A1` / `AOUT1`)** | **DAEX25FHE-4 Terminal `+`** | Either polarity works; if the exciter pushes *with* the tremor instead of against it, either swap `A1`/`A2` wires or set `OUTPUT_SIGN = -1` in `tremor_canceller.py`. |
-| **Channel A Output 2 (`A2` / `AOUT2`)** | **DAEX25FHE-4 Terminal `-`** | |
+| **Spliced USB `+5V` (Red)** | **Pico `VSYS` (Physical Pin 39)**<br>**Boost Converter `VIN+`** | Powers the Pico and feeds the input of the boost converter |
+| **Spliced USB `GND` (Black)** | **Breadboard Common `GND` Rail** | Common ground reference for the entire circuit |
+| **Boost Converter `VOUT+` (9V–12V)** | **Adafruit DRV8871 `VM` / `POWER +`** | **6.5V–45V motor power only.** Place a decoupling capacitor across `VM` and `GND` |
+| **Pico `3V3(OUT)` (Physical Pin 36)** | **GY-521 `VCC`** | Supplies regulated 3.3V power to the MPU-6051M board *(GY-521 also has an onboard LDO that accepts 3.3V–5V on `VCC`)* |
+| **Breadboard Common `GND` Rail** | **Pico `GND` (Pin 3 & Pin 38)**<br>**GY-521 `GND`**<br>**Boost Converter `VIN-` / `VOUT-`**<br>**Adafruit DRV8871 `GND` / `POWER -`** | **All grounds must be tied together** |
+
+---
+
+### B. MPU-6051M (GY-521 Breakout) I2C Wiring
+
+| Pico Pin Name | Pico Physical Pin # | GY-521 Pin | Function |
+| :--- | :---: | :--- | :--- |
+| **`3V3(OUT)`** | **Pin 36** *(right, 5th down)* | **`VCC`** | 3.3V Power |
+| **`GND`** | **Pin 3** *(left, 3rd down)* | **`GND`** | Common Ground |
+| **`GP1` (I2C0 SCL)** | **Pin 2** *(left, 2nd down)* | **`SCL`** | I2C Clock (400 kHz) |
+| **`GP0` (I2C0 SDA)** | **Pin 1** *(top-left)* | **`SDA`** | I2C Data (400 kHz) |
+| **`GND`** *(or leave unconnected)* | **Pin 3** | **`AD0`** | Sets I2C address to `0x68` (`3.3V` = `0x69`; code auto-detects both) |
+
+*(Note: `XDA`, `XCL`, and `INT` on the GY-521 can be left unconnected.)*
+
+---
+
+### C. Adafruit DRV8871 Control & Speaker Wiring
+
+The Adafruit DRV8871 generates its own internal logic supply from `VM`, so it only needs **`IN1`**, **`IN2`**, and **`GND`** from the Pico:
+
+| Pico / Power Pin | Pico Physical Pin # | Adafruit DRV8871 Pin | Function |
+| :--- | :---: | :--- | :--- |
+| **`GP14` (PWM7 A)** | **Pin 19** *(left, 2nd from bottom)* | **`IN1`** | 20 kHz PWM Half-Bridge Input 1 (3.3V logic) |
+| **`GP15` (PWM7 B)** | **Pin 20** *(bottom-left corner)* | **`IN2`** | 20 kHz PWM Half-Bridge Input 2 (3.3V logic) |
+| **Breadboard `GND`** | **Pin 18 / Pin 38** | **`GND` / `POWER -`** | Common Ground |
+| **Boost Converter `VOUT+`** | *(9V–12V Boosted Rail)* | **`VM` / `POWER +`** | Motor Power Supply (6.5V–45V) |
+| *Speaker Terminal `+`* | — | **`MOTOR OUT1`** | Speaker / Exciter Voice Coil `+` |
+| *Speaker Terminal `-`* | — | **`MOTOR OUT2`** | Speaker / Exciter Voice Coil `-` |
 
 ---
 
@@ -104,26 +88,25 @@ If using a DRV8835 board with direct `MODE`, `APHASE`, and `AENABLE` pins instea
 
 ```
                    +---------[USB]---------+
-  I2C0 SDA -> GP0  |  1                 40 | VBUS
-  I2C0 SCL -> GP1  |  2                 39 | VSYS <--- +5V from Spliced USB
-       GND -> GND  |  3                 38 | GND  <--- GND from Spliced USB
-              GP2  |  4                 37 | 3V3_EN
-              GP3  |  5                 36 | 3V3(OUT) -> +3.3V Logic to IMU & Qwiic
-              ...  | ..                 .. | ...
- DRV MODE* -> GP13 | 17                 24 | GP18
-       GND -> GND  | 18                 23 | GND
-DRV PHASE* -> GP14 | 19                 22 | GP17
-   DRV EN* -> GP15 | 20                 21 | GP16
+  GY-521 SDA -> GP0|  1                 40 | VBUS
+  GY-521 SCL -> GP1|  2                 39 | VSYS <--- +5V from Spliced USB
+  GY-521 GND -> GND|  3                 38 | GND  <--- Common GND (USB, Boost, DRV8871)
+                GP2|  4                 37 | 3V3_EN
+                GP3|  5                 36 | 3V3(OUT) -> GY-521 VCC
+                ...| ..                 .. | ...
+               GP13| 17                 24 | GP18
+ DRV8871 GND -> GND| 18                 23 | GND
+ DRV8871 IN1 ->GP14| 19                 22 | GP17
+ DRV8871 IN2 ->GP15| 20                 21 | GP16
                    +-----------------------+
-  (*GP13/GP14/GP15 only needed if wiring DRV8835 via direct GPIO instead of Qwiic I2C)
 ```
 
 ---
 
 ## 5. Running & Tuning
 
-1. Hold the device still at power-up for **~2 seconds** while `calibrate_bias()` measures the gyroscope's resting zero offset.
-2. Verify axis orientation:
-   * Set `GYRO_AXIS` (`0` = X, `1` = Y, `2` = Z) in `tremor_canceller.py` to match the axis the hand tremor rotates around.
-   * If the exciter reinforces the shake instead of damping it, flip `OUTPUT_SIGN` from `1` to `-1` (or swap the `A1`/`A2` exciter wires).
-3. Adjust `KP` (cancellation strength) and `KD` (phase-lead compensation) in `tremor_canceller.py` to match the weight glued to your exciter.
+1. **Measure Boost Converter Voltage:** Measure the output voltage of your boost converter with a multimeter (must be $\ge 6.5\text{V}$ for the DRV8871) and set `VM_VOLTS` in `tremor_canceller.py` to match.
+2. **Hold Still at Startup:** Hold the rig still for **~2 seconds** at power-up while `calibrate_bias()` zeroes the gyroscope.
+3. **Verify Polarity & Axis:**
+   * Set `GYRO_AXIS` (`0` = X, `1` = Y, `2` = Z) in `tremor_canceller.py` to match the axis the tremor rotates around.
+   * If the speaker reinforces the shake instead of damping it, flip `OUTPUT_SIGN` from `1` to `-1` (or swap `MOTOR OUT1`/`OUT2`).
