@@ -127,6 +127,12 @@ class MPU6050:
         raw = struct.unpack_from('>h', self._buf, GYRO_AXIS * 2)[0]
         return raw * _GYRO_DPS_PER_LSB
 
+    def read_xy_dps(self):
+        """Angular velocity (gx, gy) in deg/s on both X and Y axes in a single I2C read."""
+        self.i2c.readfrom_mem_into(self.addr, _MPU_GYRO_XOUT_H, self._buf)
+        rx, ry = struct.unpack_from('>hh', self._buf, 0)
+        return rx * _GYRO_DPS_PER_LSB, ry * _GYRO_DPS_PER_LSB
+
 
 # ==============================================================================
 # 3. ADAFRUIT DRV8871 DRIVER (Dual-PWM with Slow-Decay / Brake Mode)
@@ -211,21 +217,28 @@ class Biquad:
 # 5. MAIN
 # ==============================================================================
 def calibrate_bias(imu, n=500):
-    """Average gyro at rest to remove zero-rate offset. Keep the device STILL."""
-    print("Calibrating gyro bias - hold still...")
-    total = 0.0
-    lo, hi = 1e9, -1e9
+    """Average gyro X and Y at rest to remove zero-rate offset. Keep the device STILL."""
+    print("Calibrating gyro bias (X & Y) - hold still...")
+    total_x = 0.0
+    total_y = 0.0
+    lo_x, hi_x = 1e9, -1e9
+    lo_y, hi_y = 1e9, -1e9
     for _ in range(n):
-        v = imu.read_dps()
-        total += v
-        lo = min(lo, v)
-        hi = max(hi, v)
+        vx, vy = imu.read_xy_dps()
+        total_x += vx
+        total_y += vy
+        lo_x = min(lo_x, vx)
+        hi_x = max(hi_x, vx)
+        lo_y = min(lo_y, vy)
+        hi_y = max(hi_y, vy)
         time.sleep_ms(4)
-    bias = total / n
-    if (hi - lo) > 6.0:
-        print("WARNING: device moved during calibration (spread %.1f dps). Restart for best results." % (hi - lo))
-    print("Gyro bias: %.2f dps" % bias)
-    return bias
+    bias_x = total_x / n
+    bias_y = total_y / n
+    spread = max(hi_x - lo_x, hi_y - lo_y)
+    if spread > 6.0:
+        print("WARNING: device moved during calibration (spread %.1f dps). Restart for best results." % spread)
+    print("Gyro bias: X=%.2f dps, Y=%.2f dps" % (bias_x, bias_y))
+    return bias_x, bias_y
 
 
 def main():
@@ -243,7 +256,7 @@ def main():
         print("DRV8871 PWM on GP%d/GP%d | Max duty %.0f%% (%.2f V peak at VM=%.1f V)" %
               (PIN_IN1, PIN_IN2, MAX_DUTY * 100, MAX_DUTY * VM_VOLTS, VM_VOLTS))
 
-        bias = calibrate_bias(imu)
+        bias_x, bias_y = calibrate_bias(imu)
 
         # 1st-order high-pass (3 Hz) + 2nd-order low-pass (12 Hz)
         hp = Biquad('hp1', BAND_LOW_HZ, SAMPLE_HZ)
@@ -253,7 +266,8 @@ def main():
         step_us = int(DT * 1000000)
         next_tick = time.ticks_us()
         for _ in range(SAMPLE_HZ // 2):
-            lp.step(hp.step(imu.read_dps() - bias))
+            vx, vy = imu.read_xy_dps()
+            lp.step(hp.step((vx - bias_x) + (vy - bias_y)))
             next_tick = time.ticks_add(next_tick, step_us)
             while time.ticks_diff(next_tick, time.ticks_us()) > 0:
                 pass
@@ -279,7 +293,8 @@ def main():
         while True:
             # ---- 1. sense -----------------------------------------------------
             try:
-                raw = imu.read_dps() - bias
+                vx, vy = imu.read_xy_dps()
+                raw = (vx - bias_x) + (vy - bias_y)
                 fails = 0
             except OSError:
                 fails += 1
