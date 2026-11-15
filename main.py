@@ -36,8 +36,7 @@ time.sleep(1)
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-USE_BOTH_XY_AXES = True  # True = smooth energy-weighted X+Y blending; False = single GYRO_AXIS
-GYRO_AXIS = 0            # Fallback axis (0 = X, 1 = Y, 2 = Z) if USE_BOTH_XY_AXES is False
+GYRO_AXIS = 0            # 0 = X, 1 = Y, 2 = Z  (axis the tremor rotates about)
 OUTPUT_SIGN = 1          # flip to -1 if the actuator pushes WITH the tremor instead of against it
 ENABLE_OUTPUT = True     # False = telemetry only (motor driver never driven) for bring-up
 
@@ -49,15 +48,11 @@ DT = 1.0 / SAMPLE_HZ
 BAND_LOW_HZ = 3.0        # 1st-order high-pass corner: rejects slow voluntary movement with minimal phase lead
 BAND_HIGH_HZ = 12.0      # 2nd-order low-pass corner: rejects high-frequency noise / mechanical ringing
 
-# Control gains (tau_d = KD / KP = 0.004 s for phase lead without exciting speaker rattle)
+# Control gains (tau_d = KD / KP = 0.008 s matches the LP filter lag across 4-10 Hz)
 KP = 1.0                 # cancellation strength. Tune upward/downward as needed
-KD = 0.004               # phase lead (seconds) to offset filter + mechanical lag
-DEADZONE_DPS = 4.0       # soft deadzone, deg/s (stops idle buzz and mechanical rattle feedback)
+KD = 0.008               # phase lead (KP * 0.008 s) to offset low-pass + mechanical lag
+DEADZONE_DPS = 3.0       # soft deadzone, deg/s (stops idle buzz)
 FULL_SCALE_DPS = 60.0    # (KP*tremor + KD*accel) of this size = 100% command
-
-# Feedback-loop mitigation (detects sustained self-oscillation and throttles gain)
-FB_TRIGGER_CMD = 0.25    # sustained command envelope threshold indicating feedback oscillation
-FB_MIN_SCALE = 0.25      # minimum backoff gain during feedback suppression to break the loop
 
 # Power / driver limits (4 ohm, 5W speaker powered by 12V supply through DRV8871)
 VM_VOLTS = 12.0          # actual voltage on DRV8871 VM pin (12V supply)
@@ -131,12 +126,6 @@ class MPU6050:
         self.i2c.readfrom_mem_into(self.addr, _MPU_GYRO_XOUT_H, self._buf)
         raw = struct.unpack_from('>h', self._buf, GYRO_AXIS * 2)[0]
         return raw * _GYRO_DPS_PER_LSB
-
-    def read_xy_dps(self):
-        """Angular velocity (gx, gy) in deg/s on both X and Y axes in a single I2C read."""
-        self.i2c.readfrom_mem_into(self.addr, _MPU_GYRO_XOUT_H, self._buf)
-        rx, ry = struct.unpack_from('>hh', self._buf, 0)
-        return rx * _GYRO_DPS_PER_LSB, ry * _GYRO_DPS_PER_LSB
 
 
 # ==============================================================================
@@ -222,28 +211,21 @@ class Biquad:
 # 5. MAIN
 # ==============================================================================
 def calibrate_bias(imu, n=500):
-    """Average gyro X and Y at rest to remove zero-rate offset. Keep the device STILL."""
-    print("Calibrating gyro bias (X & Y) - hold still...")
-    total_x = 0.0
-    total_y = 0.0
-    lo_x, hi_x = 1e9, -1e9
-    lo_y, hi_y = 1e9, -1e9
+    """Average gyro at rest to remove zero-rate offset. Keep the device STILL."""
+    print("Calibrating gyro bias - hold still...")
+    total = 0.0
+    lo, hi = 1e9, -1e9
     for _ in range(n):
-        vx, vy = imu.read_xy_dps()
-        total_x += vx
-        total_y += vy
-        lo_x = min(lo_x, vx)
-        hi_x = max(hi_x, vx)
-        lo_y = min(lo_y, vy)
-        hi_y = max(hi_y, vy)
+        v = imu.read_dps()
+        total += v
+        lo = min(lo, v)
+        hi = max(hi, v)
         time.sleep_ms(4)
-    bias_x = total_x / n
-    bias_y = total_y / n
-    spread = max(hi_x - lo_x, hi_y - lo_y)
-    if spread > 6.0:
-        print("WARNING: device moved during calibration (spread %.1f dps). Restart for best results." % spread)
-    print("Gyro bias: X=%.2f dps, Y=%.2f dps" % (bias_x, bias_y))
-    return bias_x, bias_y
+    bias = total / n
+    if (hi - lo) > 6.0:
+        print("WARNING: device moved during calibration (spread %.1f dps). Restart for best results." % (hi - lo))
+    print("Gyro bias: %.2f dps" % bias)
+    return bias
 
 
 def main():
@@ -261,21 +243,17 @@ def main():
         print("DRV8871 PWM on GP%d/GP%d | Max duty %.0f%% (%.2f V peak at VM=%.1f V)" %
               (PIN_IN1, PIN_IN2, MAX_DUTY * 100, MAX_DUTY * VM_VOLTS, VM_VOLTS))
 
-        bias_x, bias_y = calibrate_bias(imu)
+        bias = calibrate_bias(imu)
 
-        # 1st-order high-pass (3 Hz) + 2nd-order low-pass (12 Hz) on both X and Y axes
-        hp_x = Biquad('hp1', BAND_LOW_HZ, SAMPLE_HZ)
-        lp_x = Biquad('lp', BAND_HIGH_HZ, SAMPLE_HZ)
-        hp_y = Biquad('hp1', BAND_LOW_HZ, SAMPLE_HZ)
-        lp_y = Biquad('lp', BAND_HIGH_HZ, SAMPLE_HZ)
+        # 1st-order high-pass (3 Hz) + 2nd-order low-pass (12 Hz)
+        hp = Biquad('hp1', BAND_LOW_HZ, SAMPLE_HZ)
+        lp = Biquad('lp', BAND_HIGH_HZ, SAMPLE_HZ)
 
         # Settle the filters at exact SAMPLE_HZ pacing with output disabled (~0.5 s)
         step_us = int(DT * 1000000)
         next_tick = time.ticks_us()
         for _ in range(SAMPLE_HZ // 2):
-            vx, vy = imu.read_xy_dps()
-            lp_x.step(hp_x.step(vx - bias_x))
-            lp_y.step(hp_y.step(vy - bias_y))
+            lp.step(hp.step(imu.read_dps() - bias))
             next_tick = time.ticks_add(next_tick, step_us)
             while time.ticks_diff(next_tick, time.ticks_us()) > 0:
                 pass
@@ -286,13 +264,6 @@ def main():
 
         last_tremor = 0.0
         accel_s = 0.0
-        env_x = 0.0
-        env_y = 0.0
-        corr_xy = 0.0
-        sy_smooth = 1.0
-        cmd_s = 0.0
-        cmd_env = 0.0
-        fb_scale = 1.0
         mean_sq_v = 0.0
         pw_alpha = DT / POWER_WINDOW_S
         deadzone_pd = KP * DEADZONE_DPS
@@ -302,71 +273,43 @@ def main():
         out_scale = 1.0
 
         gc.collect()
-        print("Running. Ctrl-C to stop.  KP=%.2f KD=%.4f xy=%s sign=%+d output=%s" %
-              (KP, KD, USE_BOTH_XY_AXES, OUTPUT_SIGN, ENABLE_OUTPUT))
+        print("Running. Ctrl-C to stop.  KP=%.2f KD=%.4f sign=%+d output=%s" % (KP, KD, OUTPUT_SIGN, ENABLE_OUTPUT))
         next_tick = time.ticks_us()
 
         while True:
-            # ---- 1. sense (X and Y axes in a single I2C transaction) ----------
+            # ---- 1. sense -----------------------------------------------------
             try:
-                vx, vy = imu.read_xy_dps()
-                raw_x = vx - bias_x
-                raw_y = vy - bias_y
+                raw = imu.read_dps() - bias
                 fails = 0
             except OSError:
                 fails += 1
                 spk.stop()
                 if fails >= MAX_CONSECUTIVE_I2C_FAILS:
                     raise RuntimeError("IMU communication lost")
-                raw_x = None
-                raw_y = None
+                raw = None
 
-            if raw_x is not None:
-                # ---- 2. band-pass (3-12 Hz) & smooth energy-weighted X+Y ------
-                tx = lp_x.step(hp_x.step(raw_x))
-                ty = lp_y.step(hp_y.step(raw_y))
+            if raw is not None:
+                # ---- 2. band-pass (3-12 Hz) ----------------------------------
+                tremor = lp.step(hp.step(raw))
 
-                if USE_BOTH_XY_AXES:
-                    # Smooth energy-weighted blending prevents sign-flip discontinuities
-                    # and avoids sqrt(2) gain inflation when shaking diagonally.
-                    env_x += 0.015 * (abs(tx) - env_x)
-                    env_y += 0.015 * (abs(ty) - env_y)
-                    corr_xy += 0.015 * (tx * ty - corr_xy)
-                    target_sy = 1.0 if corr_xy >= 0.0 else -1.0
-                    sy_smooth += 0.02 * (target_sy - sy_smooth)
-                    env_tot = env_x + env_y + 0.1
-                    tremor = (env_x * tx + env_y * sy_smooth * ty) / env_tot
-                    raw = (env_x * raw_x + env_y * sy_smooth * raw_y) / env_tot
-                else:
-                    tremor = tx if GYRO_AXIS == 0 else ty
-                    raw = raw_x if GYRO_AXIS == 0 else raw_y
-
-                # ---- 3. derivative for phase lead (heavily smoothed) ----------
+                # ---- 3. derivative for phase lead (lightly smoothed) ---------
                 accel = (tremor - last_tremor) / DT
                 last_tremor = tremor
-                accel_s += 0.15 * (accel - accel_s)
+                accel_s += 0.3 * (accel - accel_s)
 
-                # ---- 4. inverted PD + soft deadzone + command smoothing -------
+                # ---- 4. inverted PD + continuous soft deadzone ---------------
                 # Combine proportional and phase-lead terms BEFORE the deadzone
                 # so the output transitions smoothly through zero without step jumps.
                 pd_dps = KP * tremor + KD * accel_s
                 mag = abs(pd_dps) - deadzone_pd
                 if mag <= 0.0:
-                    raw_cmd = 0.0
+                    cmd = 0.0
                 else:
                     s = 1.0 if pd_dps > 0.0 else -1.0
-                    raw_cmd = -OUTPUT_SIGN * (s * mag) / FULL_SCALE_DPS
+                    cmd = -OUTPUT_SIGN * (s * mag) / FULL_SCALE_DPS
 
-                cmd_s += 0.35 * (raw_cmd - cmd_s)
-
-                # ---- 5. active feedback-loop suppressor & power limiter -------
-                cmd_env += 0.02 * (abs(cmd_s) - cmd_env)
-                if cmd_env > FB_TRIGGER_CMD:
-                    fb_scale = max(FB_MIN_SCALE, fb_scale * 0.96)
-                elif cmd_env < FB_TRIGGER_CMD * 0.6:
-                    fb_scale = min(1.0, fb_scale * 1.005)
-
-                cmd = cmd_s * out_scale * fb_scale
+                # ---- 5. running power limiter --------------------------------
+                cmd *= out_scale
                 if ENABLE_OUTPUT:
                     v = spk.drive(cmd)
                 else:
@@ -384,7 +327,7 @@ def main():
                     tick = 0
                     led.toggle()
                     print("Gyro:%.1f,Tremor:%.1f,Out:%.1f,Scale:%.2f" %
-                          (raw, tremor, cmd * 100.0, out_scale * fb_scale))
+                          (raw, tremor, cmd * 100.0, out_scale))
 
             if wdt:
                 wdt.feed()
