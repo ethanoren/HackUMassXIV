@@ -36,7 +36,7 @@ from machine import Pin, I2C, PWM
 # ==============================================================================
 GYRO_AXIS = 0            # 0 = X, 1 = Y, 2 = Z  (axis the tremor rotates about)
 OUTPUT_SIGN = 1          # flip to -1 if the actuator pushes WITH the tremor instead of against it
-ENABLE_OUTPUT = FALSE     # False = telemetry only (motor driver never driven) for bring-up
+ENABLE_OUTPUT = True     # False = telemetry only (motor driver never driven) for bring-up
 
 # Loop timing
 SAMPLE_HZ = 250
