@@ -53,6 +53,8 @@ KP = 1.0                 # cancellation strength. Tune upward/downward as needed
 KD = 0.008               # phase lead (KP * 0.008 s) to offset low-pass + mechanical lag
 DEADZONE_DPS = 3.0       # soft deadzone, deg/s (stops idle buzz)
 FULL_SCALE_DPS = 60.0    # (KP*tremor + KD*accel) of this size = 100% command
+GAIN_LOW = 4.0           # multiplier at the low end (just above deadzone)
+GAIN_HIGH = 2.0          # multiplier at the high end (at 100% full output)
 
 # Power / driver limits (4 ohm, 5W speaker powered by 12V supply through DRV8871)
 VM_VOLTS = 12.0          # actual voltage on DRV8871 VM pin (12V supply)
@@ -321,7 +323,11 @@ def main():
                     cmd = 0.0
                 else:
                     s = 1.0 if pd_dps > 0.0 else -1.0
-                    cmd = -OUTPUT_SIGN * (s * mag) / FULL_SCALE_DPS
+                    u = mag / FULL_SCALE_DPS
+                    # Taper multiplier smoothly from GAIN_LOW (4x) at low end to GAIN_HIGH (2x) at high end (u = 0.5)
+                    t = min(1.0, u * GAIN_HIGH)
+                    mult = GAIN_LOW - (GAIN_LOW - GAIN_HIGH) * t
+                    cmd = -OUTPUT_SIGN * s * min(1.0, u * mult)
 
                 # ---- 5. running power limiter --------------------------------
                 cmd *= out_scale
