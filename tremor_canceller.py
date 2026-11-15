@@ -81,7 +81,7 @@ _MPU_GYRO_CONFIG = 0x1B
 _MPU_GYRO_XOUT_H = 0x43
 _MPU_PWR_MGMT_1 = 0x6B
 _MPU_WHO_AM_I = 0x75
-_GYRO_DPS_PER_LSB = 1.0 / 65.5   # 65.5 LSB/(deg/s) at +/-500 dps (~0.015267 dps/LSB)
+_GYRO_DPS_PER_LSB = 1.0 / 16.4   # 16.4 LSB/(deg/s) at +/-2000 dps (~0.060976 dps/LSB)
 
 
 class MPU6050:
@@ -110,8 +110,8 @@ class MPU6050:
         # DLPF_CFG = 1 (188 Hz bandwidth, 1 kHz internal rate), SMPLRT_DIV = 0 (1 kHz)
         i2c.writeto_mem(self.addr, _MPU_CONFIG, b'\x01')
         i2c.writeto_mem(self.addr, _MPU_SMPLRT_DIV, b'\x00')
-        # FS_SEL = 1 (+/-500 dps -> 0x08)
-        i2c.writeto_mem(self.addr, _MPU_GYRO_CONFIG, b'\x08')
+        # FS_SEL = 3 (+/-2000 dps -> 0x18) so vigorous shaking never clips/saturates
+        i2c.writeto_mem(self.addr, _MPU_GYRO_CONFIG, b'\x18')
         time.sleep_ms(100)  # let gyro PLL and DLPF settle
 
     def read_dps(self):
