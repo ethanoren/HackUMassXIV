@@ -3,7 +3,7 @@
 An active, real-time hand tremor cancellation device built with a Raspberry Pi Pico (MicroPython), an InvenSense MPU-6051M / MPU-6050 6-DoF IMU (GY-521 breakout), an Adafruit DRV8871 H-bridge motor driver powered directly by a 12V battery pack (8 $\times$ AA), and a weighted 4 $\Omega$, 5W speaker driver acting as an inertial reaction-mass actuator.
 
 > [!IMPORTANT]
-> **Disclaimer:** This is **not** a medical device. This project is an experimental hackathon proof of concept, and your mileage may vary (YMMV) for actually reducing the intensity of hand tremors.
+> **Disclaimer:** This is **not** a medical device. This project is an experimental hackathon proof of concept, and your mileage may vary for actually reducing the intensity of hand tremors.
 
 ---
 
