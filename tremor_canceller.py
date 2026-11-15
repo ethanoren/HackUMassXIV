@@ -89,15 +89,20 @@ class MPU6050:
         self.i2c = i2c
         self.addr = None
         self.who_am_i = None
-        scanned = i2c.scan()
-        for a in (0x68, 0x69):
-            if a in scanned:
-                try:
-                    self.who_am_i = i2c.readfrom_mem(a, _MPU_WHO_AM_I, 1)[0]
-                    self.addr = a
-                    break
-                except OSError:
-                    pass
+        # Retry for up to 3 seconds on cold VSYS power-up while GY-521 LDO powers up
+        for _ in range(30):
+            scanned = i2c.scan()
+            for a in (0x68, 0x69):
+                if a in scanned:
+                    try:
+                        self.who_am_i = i2c.readfrom_mem(a, _MPU_WHO_AM_I, 1)[0]
+                        self.addr = a
+                        break
+                    except OSError:
+                        pass
+            if self.addr is not None:
+                break
+            time.sleep_ms(100)
         if self.addr is None:
             raise RuntimeError("MPU-6051M / GY-521 not found at 0x68 or 0x69. Check wiring.")
 
@@ -225,6 +230,11 @@ def main():
     spk = Speaker()          # outputs forced to zero immediately
     wdt = None
     try:
+        led = Pin("LED", Pin.OUT)
+    except Exception:
+        led = Pin(25, Pin.OUT)
+    led.value(1)             # solid ON during boot & gyro calibration
+    try:
         i2c = I2C(0, sda=Pin(PIN_SDA), scl=Pin(PIN_SCL), freq=400000)
         imu = MPU6050(i2c)
         print("GY-521 / MPU-6051M found at %s (WHO_AM_I=%s)" % (hex(imu.addr), hex(imu.who_am_i)))
@@ -309,10 +319,11 @@ def main():
                 elif out_scale < 1.0:
                     out_scale = min(1.0, out_scale * 1.002)  # recover slowly
 
-                # ---- 6. telemetry (~25 Hz) for Thonny Plotter ----------------
+                # ---- 6. telemetry (~25 Hz) & heartbeat LED -------------------
                 tick += 1
                 if tick >= 10:
                     tick = 0
+                    led.toggle()
                     print("Gyro:%.1f,Tremor:%.1f,Out:%.1f,Scale:%.2f" %
                           (raw, tremor, cmd * 100.0, out_scale))
 
