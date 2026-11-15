@@ -36,7 +36,7 @@ from machine import Pin, I2C, PWM
 # ==============================================================================
 GYRO_AXIS = 0            # 0 = X, 1 = Y, 2 = Z  (axis the tremor rotates about)
 OUTPUT_SIGN = 1          # flip to -1 if the actuator pushes WITH the tremor instead of against it
-ENABLE_OUTPUT = True     # False = telemetry only (motor driver never driven) for bring-up
+ENABLE_OUTPUT = FALSE     # False = telemetry only (motor driver never driven) for bring-up
 
 # Loop timing
 SAMPLE_HZ = 250
@@ -52,12 +52,12 @@ KD = 0.008               # phase lead (KP * 0.008 s) to offset low-pass + mechan
 DEADZONE_DPS = 3.0       # soft deadzone, deg/s (stops idle buzz)
 FULL_SCALE_DPS = 60.0    # (KP*tremor + KD*accel) of this size = 100% command
 
-# Power / driver limits (Adjust VM_VOLTS to match your boost converter output!)
-VM_VOLTS = 9.0           # actual voltage from boost converter on DRV8871 VM pin (6.5 V min for DRV8871)
-SPEAKER_OHMS = 4.0       # speaker nominal impedance (e.g., 2.0 or 4.0 ohm)
-SPEAKER_MAX_V = 4.8      # peak allowed voltage across speaker during initial burst
-SPEAKER_CONT_W = 2.5     # continuous average thermal power budget (watts)
-POWER_WINDOW_S = 1.0     # averaging window (s) before thermal limiter forces power down
+# Power / driver limits (4 ohm, 5W speaker powered by 12V supply through DRV8871)
+VM_VOLTS = 12.0          # actual voltage on DRV8871 VM pin (12V supply)
+SPEAKER_OHMS = 4.0       # 4 ohm, 5W speaker nominal impedance
+SPEAKER_MAX_V = 6.0      # 6.0 V peak -> 1.5 A peak & 4.5 W RMS sine burst into 4 ohm (50% duty at 12V)
+SPEAKER_CONT_W = 2.5     # 2.5 W continuous average thermal budget (50% of 5W speaker rating)
+POWER_WINDOW_S = 1.0     # 1.0 s window before thermal limiter forces burst power down
 PWM_HZ = 20000           # 20 kHz (ultrasonic; DRV8871 supports up to 200 kHz)
 
 MAX_DUTY = min(1.0, SPEAKER_MAX_V / VM_VOLTS)
