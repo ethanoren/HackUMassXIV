@@ -49,14 +49,12 @@ DT = 1.0 / SAMPLE_HZ
 BAND_LOW_HZ = 3.0        # 1st-order high-pass corner: rejects slow voluntary movement with minimal phase lead
 BAND_HIGH_HZ = 12.0      # 2nd-order low-pass corner: rejects high-frequency noise / mechanical ringing
 
-# Control gains & non-linear exponential boost
-# (tau_d = KD / KP = 0.008 s matches the LP filter lag across 4-10 Hz)
+# Control gains (tau_d = KD / KP = 0.008 s matches the LP filter lag across 4-10 Hz)
 KP = 1.0                 # cancellation strength. Tune upward/downward as needed
 KD = 0.008               # phase lead (KP * 0.008 s) to offset low-pass + mechanical lag
-DEADZONE_DPS = 2.0       # soft deadzone, deg/s (stops idle buzz)
-FULL_SCALE_DPS = 40.0    # linear reference scale before boost
-RESPONSE_GAIN = 2.0      # overall amplitude multiplier
-RESPONSE_EXP = 0.5       # exponent (< 1.0 boosts weak/low tremors much more than strong tremors; 1.0 = linear)
+DEADZONE_DPS = 3.0       # soft deadzone, deg/s (stops idle buzz)
+FULL_SCALE_DPS = 60.0    # original full-scale reference
+RESPONSE_GAIN = 2.0      # flat 2x multiplier over original values (linear scaling)
 
 # Power / driver limits (4 ohm, 5W speaker powered by 12V supply through DRV8871)
 VM_VOLTS = 12.0          # actual voltage on DRV8871 VM pin (12V supply)
@@ -285,7 +283,6 @@ def main():
 
         last_tremor = 0.0
         accel_s = 0.0
-        corr_xy = 0.0
         mean_sq_v = 0.0
         pw_alpha = DT / POWER_WINDOW_S
         deadzone_pd = KP * DEADZONE_DPS
@@ -295,8 +292,8 @@ def main():
         out_scale = 1.0
 
         gc.collect()
-        print("Running. Ctrl-C to stop.  KP=%.2f KD=%.4f gain=%.1f exp=%.2f sign=%+d output=%s" %
-              (KP, KD, RESPONSE_GAIN, RESPONSE_EXP, OUTPUT_SIGN, ENABLE_OUTPUT))
+        print("Running. Ctrl-C to stop.  KP=%.2f KD=%.4f gain=%.1fx sign=%+d output=%s" %
+              (KP, KD, RESPONSE_GAIN, OUTPUT_SIGN, ENABLE_OUTPUT))
         next_tick = time.ticks_us()
 
         while True:
@@ -315,18 +312,13 @@ def main():
                 raw_y = None
 
             if raw_x is not None:
-                # ---- 2. band-pass (3-12 Hz) & 2D X+Y combination --------------
+                # ---- 2. band-pass (3-12 Hz) & smooth linear X+Y sum -----------
                 tx = lp_x.step(hp_x.step(raw_x))
                 ty = lp_y.step(hp_y.step(raw_y))
 
                 if USE_BOTH_XY_AXES:
-                    # Track whether X and Y are oscillating in-phase or out-of-phase
-                    # so diagonal shakes at any angle never cancel out
-                    corr_xy += 0.05 * (tx * ty - corr_xy)
-                    sum_xy = (tx + ty) if corr_xy >= 0.0 else (tx - ty)
-                    s_xy = 1.0 if sum_xy >= 0.0 else -1.0
-                    tremor = s_xy * math.sqrt(tx * tx + ty * ty)
-                    raw = s_xy * math.sqrt(raw_x * raw_x + raw_y * raw_y)
+                    tremor = tx + ty
+                    raw = raw_x + raw_y
                 else:
                     tremor = tx if GYRO_AXIS == 0 else ty
                     raw = raw_x if GYRO_AXIS == 0 else raw_y
@@ -336,20 +328,14 @@ def main():
                 last_tremor = tremor
                 accel_s += 0.3 * (accel - accel_s)
 
-                # ---- 4. inverted PD + deadzone + exponential boost -----------
-                # Combine proportional and phase-lead terms BEFORE the deadzone
-                # so the output transitions smoothly through zero without step jumps.
+                # ---- 4. inverted PD + original linear scaling * 2x flat ------
                 pd_dps = KP * tremor + KD * accel_s
                 mag = abs(pd_dps) - deadzone_pd
                 if mag <= 0.0:
                     cmd = 0.0
                 else:
                     s = 1.0 if pd_dps > 0.0 else -1.0
-                    # Normalize and apply RESPONSE_GAIN + power-law exponent (< 1.0)
-                    # so weak/small tremors get multiplied much more than strong ones
-                    norm = min(1.0, (RESPONSE_GAIN * mag) / FULL_SCALE_DPS)
-                    boosted = math.pow(norm, RESPONSE_EXP)
-                    cmd = -OUTPUT_SIGN * s * boosted
+                    cmd = -OUTPUT_SIGN * RESPONSE_GAIN * (s * mag) / FULL_SCALE_DPS
 
                 # ---- 5. running power limiter --------------------------------
                 cmd *= out_scale
